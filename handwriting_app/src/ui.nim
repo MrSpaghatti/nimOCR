@@ -4,6 +4,7 @@ import strformat
 import system # For system.getTime() as per tutorial context, though times.getTime() also works
 
 # Import other modules from the project
+import types       # For Point, Stroke, DigitalInk
 import preprocessing # For FeaturePoint and later, actual preprocessing calls
 import inference   # For runInference
 
@@ -11,43 +12,21 @@ const
   WindowWidth = 800
   WindowHeight = 600
 
-type
-  Point* = object
-    x*: float
-    y*: float
-    timestamp*: int64 # Milliseconds since epoch
-    pressure*: float # Normalized pressure (0.0 to 1.0, placeholder for now)
+# Helper procedure to process a stroke for inference.
+# Normalizes the stroke and then rasterizes it to a grid.
+proc processStrokeForInference*(stroke: types.Stroke, gridSize: int): seq[float] =
+  # 1. Normalize the stroke. Coordinates will be in [0, gridSize-1].
+  let normalizedStroke = preprocessing.normalizeStroke(stroke, gridSize.float)
 
-  Stroke* = seq[Point]
-  DigitalInk* = seq[Stroke]
-
-# Helper proc to convert Stroke to seq[FeaturePoint]
-# This is a simplified version for the boilerplate.
-# In a full app, this would likely live in preprocessing.nim and do more.
-proc toFeatures(stroke: Stroke): seq[preprocessing.FeaturePoint] =
-  # For now, just convert Point to FeaturePoint without full normalization/resampling
-  # The tutorial's Part 5 ui.nim calls `normalizeStroke` first, then converts.
-  # We'll follow that structure conceptually.
-
-  # 1. Normalize (using the stub from preprocessing.nim)
-  # The targetSize 20.0 is arbitrary for now, taken from tutorial's example.
-  # The actual MNIST model expects 28x28, so this part will need refinement.
-  let normalizedStrokePoints = preprocessing.normalizeStroke(stroke, 20.0)
-
-  # 2. Convert Point to FeaturePoint
-  for p in normalizedStrokePoints:
-    result.add(preprocessing.FeaturePoint(x: p.x, y: p.y))
-
-  # If preprocessing.normalizeStroke is just a stub returning original,
-  # this will effectively just convert types.
-  # If normalizedStrokePoints is empty, result will be empty.
+  # 2. Rasterize the normalized stroke to a grid.
+  result = preprocessing.rasterizeStroke(normalizedStroke, gridSize)
 
 proc runApplication*() =
   var screen = window(WindowWidth, WindowHeight, "Nim Handwriting Recognition", 0)
 
   # Application state
-  var handwriting = newSeq[Stroke]()
-  var currentStroke = newSeq[Point]()
+  var handwriting = newSeq[types.Stroke]()
+  var currentStroke = newSeq[types.Point]()
   var isDrawing = false
   var recognizedText = "Draw a digit (0-9)" # Text to display
 
@@ -78,15 +57,18 @@ proc runApplication*() =
         if currentStroke.len > 1:
           handwriting.add(currentStroke)
 
-          # TRIGGER THE RECOGNITION PIPELINE (Conceptual based on Tutorial Part 5)
-          # Convert currentStroke to features
-          let features = toFeatures(currentStroke)
+          # TRIGGER THE RECOGNITION PIPELINE
+          # Process the current stroke to get features (rasterized bitmap)
+          const gridSize = 28 # For MNIST model
+          let features = processStrokeForInference(currentStroke, gridSize)
 
-          if features.len > 0:
+          # Ensure features are of the expected size (gridSize * gridSize)
+          if features.len == gridSize * gridSize:
             # The model path is relative to where the executable is run.
             # If running from src/: ../models/mnist-12.onnx
             # If executable is in project root: models/mnist-12.onnx
             # The README suggests running from src/, so ../models/ is appropriate.
+            # Note: inference.runInference will need to be updated to accept seq[float]
             let digit = inference.runInference("../models/mnist-12.onnx", features)
             if digit != -1:
               recognizedText = &"Recognized: {digit}"
