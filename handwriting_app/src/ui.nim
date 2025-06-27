@@ -28,27 +28,44 @@ proc runApplication*() =
   var handwriting = newSeq[types.Stroke]()
   var currentStroke = newSeq[types.Point]()
   var isDrawing = false
-  var recognizedText = "Draw some text..." # Updated default text
+  var recognizedText = "Loading models & tokenizer..." # Initial text
   let font = tfont()
+  screen.print(font, 10, 10, RGB(255, 255, 0), recognizedText)
+  screen.update() # Show loading message immediately
+
 
   # Load TrOCR tokenizer data and decoder configuration
   # Define paths relative to the src directory where main.nim is expected to be run
   let modelsBaseDir = "../models/trocr/"
   let vocabPath = modelsBaseDir & "vocab.json"
   let genConfigPath = modelsBaseDir & "generation_config.json"
-  let mainConfigPath = modelsBaseDir & "config.json" # Main config might have some fallbacks
+  let mainConfigPath = modelsBaseDir & "config.json"
+  let tokenizerConfigPath = modelsBaseDir & "tokenizer_config.json" # Added for max_length
 
-  let (idToTokenMap, decoderConfig) = inference.loadTrOCTokenizerData(
-      vocabPath, genConfigPath, mainConfigPath
+  echo &"Attempting to load tokenizer files from base directory: {modelsBaseDir}"
+  echo &"  Vocab path: {vocabPath}"
+  echo &"  Gen Config path: {genConfigPath}"
+  echo &"  Main Config path: {mainConfigPath}"
+  echo &"  Tokenizer Config path: {tokenizerConfigPath}"
+
+  let (idToTokenMap, decoderConfig, tokenizerSuccess) = inference.loadTrOCTokenizerData(
+      vocabPath, genConfigPath, mainConfigPath, tokenizerConfigPath
   )
 
-  if idToTokenMap.len == 0:
-    echo "FATAL: Failed to load TrOCR tokenizer data. Check paths and file integrity."
-    recognizedText = "Error: Tokenizer failed to load. Check console."
-    # Allow window to run to show error, but inference won't work.
+  if not tokenizerSuccess:
+    recognizedText = "FATAL: Tokenizer/Config load error. Check console."
+    # Update screen and then proceed to loop to keep window responsive
+    screen.clear(RGB(20,20,30))
+    screen.print(font, 10, 10, RGB(255,0,0), recognizedText) // Error in red
+    screen.update()
+  else:
+    recognizedText = "Draw some text..." # Ready message
 
   let encoderPath = modelsBaseDir & "encoder_model.onnx"
   let decoderPath = modelsBaseDir & "decoder_model.onnx" # Or decoder_model_merged.onnx
+  echo &"Encoder model path: {encoderPath}"
+  echo &"Decoder model path: {decoderPath}"
+
 
   while screen.closed() == 0:
     let mouseX = screen.mouseX().float
@@ -67,9 +84,25 @@ proc runApplication*() =
         if currentStroke.len > 1:
           handwriting.add(currentStroke)
 
-          if idToTokenMap.len == 0: # Check if tokenizer loaded
+          if not tokenizerSuccess: # Check if tokenizer loaded successfully
              recognizedText = "Tokenizer error. Cannot recognize."
+             # No screen.update() here, error is already on screen from startup
           else:
+            recognizedText = "Processing..."
+            # Force redraw to show "Processing..."
+            # This requires clearing, drawing strokes, then printing new text and updating
+            screen.clear(RGB(20,20,30))
+            for strokeDraw in handwriting: # Draw existing strokes
+              if strokeDraw.len >= 2:
+                for i in 0 ..< strokeDraw.len - 1:
+                  screen.line(strokeDraw[i].x.int, strokeDraw[i].y.int, strokeDraw[i+1].x.int, strokeDraw[i+1].y.int, RGB(100,100,100))
+            # Don't draw currentStroke as it's now part of handwriting / being processed
+            screen.print(font, 10, 10, RGB(255, 255, 0), recognizedText) // Show "Processing..."
+            screen.print(font, 10, WindowHeight - 30, RGB(150,150,150), "Draw text. Release mouse to recognize.")
+            screen.print(font, 10, WindowHeight - 15, RGB(150,150,150), "Press any key to clear.")
+            screen.update()
+
+
             const trocrGridSize = 384
             const lineThickness = 3 # Adjust as needed
             echo "Processing stroke for TrOCR..."
@@ -104,7 +137,11 @@ proc runApplication*() =
         screen.line(currentStroke[i].x.int, currentStroke[i].y.int, currentStroke[i+1].x.int, currentStroke[i+1].y.int, RGB(255, 255, 255))
 
     # Display the recognized text
-    screen.print(font, 10, 10, RGB(255, 255, 0), recognizedText)
+    var displayText = recognizedText
+    const maxDisplayChars = (WindowWidth - 20) div 8 // Approx chars that fit, 8px/char, 10px margin each side
+    if displayText.len > maxDisplayChars:
+      displayText = displayText[0 ..< maxDisplayChars - 3] & "..."
+    screen.print(font, 10, 10, RGB(255, 255, 0), displayText)
 
     # Display instructions
     screen.print(font, 10, WindowHeight - 30, RGB(150, 150, 150), "Draw text. Release mouse to recognize.")

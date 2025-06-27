@@ -81,7 +81,7 @@ Before you can build and run this application, you will need the following insta
         *   Encoder Output: `"last_hidden_state"`
         *   Decoder Inputs: `"input_ids"`, `"attention_mask"`, `"encoder_hidden_states"`
         *   Decoder Output: `"logits"`
-    *   **Solution 2:** If these are incorrect for the specific ONNX files you downloaded (especially if you chose a different decoder variant like one with `_past_`), you may need to inspect your `.onnx` files with a tool like Netron and update the node names in `inference.nim`.
+    *   **Solution 2:** If these are incorrect for the specific ONNX files you downloaded (especially if you chose a different decoder variant like one with `_past_`), you may need to inspect your `.onnx` files with a tool like [Netron](https://netron.app/) and update the node names in `inference.nim`. The current code expects a decoder model that can be called iteratively without explicit `past_key_values` management by the caller (e.g., `decoder_model.onnx` not `decoder_with_past_model.onnx`).
 
 *   **Compilation Error: `Error: cannot open file: tigr` or `Error: cannot open file: onnxruntime_c_api`**
     *   **Cause:** Required Nimble packages are not installed.

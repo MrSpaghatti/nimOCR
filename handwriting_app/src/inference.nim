@@ -18,47 +18,42 @@ type
     maxLength*: int
     vocabSize*: int
 
-  IdToTokenMap* = seq[string] # Index is the ID, value is the token string
+  IdToTokenMap* = Table[int64, string] # Changed from seq[string]
 
-proc loadTrOCTokenizerData*(vocabPath: string, generationConfigPath: string, mainConfigPath: string): (IdToTokenMap, DecoderConfig) =
+proc loadTrOCTokenizerData*(
+    vocabPath: string,
+    generationConfigPath: string,
+    mainConfigPath: string,
+    tokenizerConfigPath: string
+  ): (IdToTokenMap, DecoderConfig, bool) =
   ## Loads TrOCR tokenizer vocabulary and essential generation configuration.
-  var idToToken: IdToTokenMap
+  ## Returns (IdToTokenMap, DecoderConfig, success_flag).
+  var idToToken: IdToTokenMap = initTable[int64, string]() # Initialize as Table
   var decConfig: DecoderConfig
+  var success = true
 
   # Load vocab.json
   if not fileExists(vocabPath):
     echo "Error: vocab.json not found at ", vocabPath
-    return (idToToken, decConfig) # Return empty/default
+    return (idToToken, decConfig, false)
 
   try:
     let vocabContent = readFile(vocabPath)
     let vocabJson = parseJson(vocabContent)
-    var maxId = -1
-    var tempVocabTable = initTable[int, string]()
 
-    for key, valueNode in vocabJson:
+    for key, valueNode in vocabJson: # Iterating over JsonObject
       let tokenId = valueNode.getInt()
-      tempVocabTable[tokenId] = key
-      if tokenId > maxId:
-        maxId = tokenId
-
-    # Convert table to seq, ensuring correct size and order by ID
-    idToToken = newSeq[string](maxId + 1)
-    for id, tokenStr in tempVocabTable:
-      if id >= 0 and id < idToToken.len:
-        idToToken[id] = tokenStr
-      else:
-        echo "Warning: Token ID out of bounds: ", id
-        # This might happen if vocab is sparse and we are creating a dense seq.
-        # Consider if a Table[int, string] is better for idToToken itself.
-        # For now, seq assumes dense IDs from 0 to maxId.
-        # HuggingFace vocabs are usually dense from 0.
+      idToToken[tokenId.int64] = key # Directly populate the table
 
   except JsonParsingError, JsonKindError:
     echo "Error parsing vocab.json: ", getCurrentExceptionMsg()
-    return (idToToken, decConfig)
+    return (idToToken, decConfig, false)
 
-  # Load generation_config.json (and potentially main config.json for fallback)
+  if idToToken.len == 0: # Check table's length
+    echo "Error: Vocabulary loaded as empty. Cannot proceed."
+    return (idToToken, decConfig, false)
+
+  # Load configuration files
   var genConfigJson: JsonNode
   if fileExists(generationConfigPath):
     try:
@@ -73,44 +68,93 @@ proc loadTrOCTokenizerData*(vocabPath: string, generationConfigPath: string, mai
       mainConfJson = parseJson(readFile(mainConfigPath))
      except JsonParsingError, JsonKindError:
       echo "Error parsing config.json: ", getCurrentExceptionMsg()
-      # If both fail, crucial decConfig values might be missing.
+      # If all config files fail to load/parse, we might have issues.
 
-  # Extract decoder configuration, preferring generation_config then main_config's decoder section
-  proc getConfigValue(key: string, defaultValue: int64): int64 =
-    if genConfigJson != nil and genConfigJson.hasKey(key):
-      return genConfigJson[key].getInt(defaultValue)
-    elif mainConfJson != nil and mainConfJson.hasKey("decoder") and mainConfJson["decoder"].hasKey(key):
-      return mainConfJson["decoder"][key].getInt(defaultValue)
-    elif mainConfJson != nil and mainConfJson.hasKey(key): # Check root of main config too
-        return mainConfJson[key].getInt(defaultValue)
-    return defaultValue
+  var tokenizerConfJson: JsonNode
+  if fileExists(tokenizerConfigPath):
+    try:
+      tokenizerConfJson = parseJson(readFile(tokenizerConfigPath))
+    except JsonParsingError, JsonKindError:
+      echo "Error parsing tokenizer_config.json: ", getCurrentExceptionMsg()
 
-  proc getConfigIntValue(key: string, defaultValue: int): int =
-    if genConfigJson != nil and genConfigJson.hasKey(key):
-      return genConfigJson[key].getInt(defaultValue)
-    elif mainConfJson != nil and mainConfJson.hasKey("decoder") and mainConfJson["decoder"].hasKey(key):
-      return mainConfJson["decoder"][key].getInt(defaultValue)
-    elif mainConfJson != nil and mainConfJson.hasKey(key): # Check root of main config too
-        return mainConfJson[key].getInt(defaultValue)
-    return defaultValue
+  # Helper to safely get int64 config values with logging for missing keys
+  proc getConfigValue(key: string, sources: seq[JsonNode], defaultVal: int64, isCritical: bool = false): int64 =
+    for i, sourceNode in sources:
+      if sourceNode != nil:
+        # Check specific paths for some configs (e.g. decoder section in main config)
+        if key == "decoder_start_token_id" or key == "eos_token_id" or key == "pad_token_id" or key == "vocab_size":
+          if sourceNode.hasKey("decoder") and sourceNode["decoder"].hasKey(key):
+            return sourceNode["decoder"][key].getInt(defaultVal)
+        # General key check
+        if sourceNode.hasKey(key):
+          return sourceNode[key].getInt(defaultVal)
+    if isCritical:
+      echo &"CRITICAL Error: Config key '{key}' not found in any source. Using default: {defaultVal}."
+      success = false # Mark overall loading as failed if a critical key is missing
+    else:
+      echo &"Warning: Config key '{key}' not found. Using default: {defaultVal}."
+    return defaultVal
 
-  decConfig.decoderStartTokenId = getConfigValue("decoder_start_token_id", 2) # Default from research
-  decConfig.eosTokenId = getConfigValue("eos_token_id", 2)             # Default from research
-  decConfig.padTokenId = getConfigValue("pad_token_id", 1)             # Default from research
-  decConfig.maxLength = getConfigIntValue("max_length", 64)      # Default to 64 if not found. HF example uses short sentences.
-                                                              # config.json (decoder) has "max_length": 20
-                                                              # tokenizer_config.json has "model_max_length": 512
-                                                              # Let's prioritize generation_config, then decoder_config, then tokenizer_config?
-                                                              # For now, simple fallback.
-  decConfig.vocabSize = getConfigValue("vocab_size", 50265).int # From research, cast to int
+  # Helper to safely get int config values
+  proc getConfigIntValue(key: string, sources: seq[JsonNode], defaultVal: int, isCritical: bool = false): int =
+    for i, sourceNode in sources:
+      if sourceNode != nil:
+        if key == "max_length": # Special handling for max_length prioritization
+            if i == 0 and sourceNode.hasKey("max_length"): # genConfigJson
+                return sourceNode["max_length"].getInt(defaultVal)
+            elif i == 1 and sourceNode.hasKey("decoder") and sourceNode["decoder"].hasKey("max_length"): # mainConfJson (decoder section)
+                return sourceNode["decoder"]["max_length"].getInt(defaultVal)
+            elif i == 2 and sourceNode.hasKey("model_max_length"): # tokenizerConfJson
+                return sourceNode["model_max_length"].getInt(defaultVal)
+        elif sourceNode.hasKey(key) : # General key check
+             return sourceNode[key].getInt(defaultVal)
 
-  if idToToken.len == 0 : echo "Warning: Vocabulary is empty after loading."
-  if decConfig.vocabSize != idToToken.len and idToToken.len > 0 : # Adjust if vocab determines size
-      echo &"Warning: Mismatch vocab_size ({decConfig.vocabSize}) and actual vocab len ({idToToken.len}). Using actual."
-      decConfig.vocabSize = idToToken.len
+    if isCritical:
+      echo &"CRITICAL Error: Config key '{key}' not found in any source. Using default: {defaultVal}."
+      success = false
+    else:
+      echo &"Warning: Config key '{key}' not found. Using default: {defaultVal}."
+    return defaultVal
 
-  echo &"Tokenizer loaded. Vocab size: {idToToken.len}. DecoderStartID: {decConfig.decoderStartTokenId}, EOS_ID: {decConfig.eosTokenId}, MaxLength: {decConfig.maxLength}"
-  return (idToToken, decConfig)
+  let configSources = @[genConfigJson, mainConfJson, tokenizerConfJson] # Order of priority for general keys
+
+  decConfig.decoderStartTokenId = getConfigValue("decoder_start_token_id", configSources, 2, isCritical=true)
+  decConfig.eosTokenId = getConfigValue("eos_token_id", configSources, 2, isCritical=true)
+  decConfig.padTokenId = getConfigValue("pad_token_id", configSources, 1, isCritical=true)
+
+  # Max length prioritization: generation_config.json -> config.json (decoder) -> tokenizer_config.json (model_max_length) -> default
+  var maxLengthFound = false
+  if genConfigJson != nil and genConfigJson.hasKey("max_length"):
+    decConfig.maxLength = genConfigJson["max_length"].getInt(64)
+    maxLengthFound = true
+  elif mainConfJson != nil and mainConfJson.hasKey("decoder") and mainConfJson["decoder"].hasKey("max_length"):
+    decConfig.maxLength = mainConfJson["decoder"]["max_length"].getInt(64)
+    maxLengthFound = true
+  elif tokenizerConfJson != nil and tokenizerConfJson.hasKey("model_max_length"):
+    decConfig.maxLength = tokenizerConfJson["model_max_length"].getInt(64)
+    maxLengthFound = true
+
+  if not maxLengthFound:
+    echo "Warning: 'max_length' or 'model_max_length' not found in config files. Using default: 64."
+    decConfig.maxLength = 64
+
+  decConfig.vocabSize = getConfigValue("vocab_size", configSources, 50265, isCritical=true).int
+
+  if idToToken.len == 0: # This check is now after trying to load vocab
+    success = false
+
+  if decConfig.vocabSize != idToToken.len and idToToken.len > 0:
+    echo &"Warning: Mismatch vocab_size from config ({decConfig.vocabSize}) and actual vocab len ({idToToken.len}). Using actual vocab length."
+    decConfig.vocabSize = idToToken.len
+  elif idToToken.len == 0 and decConfig.vocabSize > 0:
+     echo "Error: Vocab is empty, but vocabSize in config is > 0. Tokenizer data inconsistent."
+     success = false
+
+  if not success:
+      echo "Error: One or more critical tokenizer configurations could not be loaded."
+
+  echo &"Tokenizer loaded. Vocab size: {idToToken.len}. DecoderStartID: {decConfig.decoderStartTokenId}, EOS_ID: {decConfig.eosTokenId}, MaxLength: {decConfig.maxLength}. Load success: {success}"
+  return (idToToken, decConfig, success)
 
 proc decodeTokenSequence*(ids: seq[int64], idToToken: IdToTokenMap, config: DecoderConfig): string =
   var tokens: seq[string]
@@ -121,9 +165,11 @@ proc decodeTokenSequence*(ids: seq[int64], idToToken: IdToTokenMap, config: Deco
       break
     if id_num == config.padTokenId:
       continue
-    if id_num >= 0 and id_num < idToToken.len:
+
+    if idToToken.hasKey(id_num):
       tokens.add(idToToken[id_num])
     else:
+      echo &"Warning: Unknown token ID during decoding: {id_num}"
       tokens.add("<unk>") # Or handle unknown better
 
   # Basic BPE detokenization: Replace "Ġ" with space, then join.
@@ -436,6 +482,12 @@ proc runTrOCRInference*(
     if encoderOutputTensor != nil: ort.ReleaseValue(encoderOutputTensor)
 
   # --- Decoder Pass ---
+  # Note on Decoder Model Choice:
+  # This implementation assumes a decoder model variant (e.g., `decoder_model.onnx` from Xenova)
+  # that can be called iteratively by passing the full sequence of generated `input_ids`
+  # and does not require explicit management of `past_key_values` by the caller in the loop.
+  # If using a decoder variant like `decoder_with_past_model.onnx`, the loop would need
+  # to be adapted to handle `past_key_values` as inputs and outputs of the decoder.
   if not fileExists(decoderModelPath):
     echo "Error: Decoder model file not found at ", decoderModelPath
     return "Error: Decoder model not found."
@@ -455,6 +507,7 @@ proc runTrOCRInference*(
   for stepNum in 0 ..< decConfig.maxLength:
     # Prepare input_ids tensor
     let currentInputIdsShape: seq[int64] = @[1'i64, generatedTokenIds.len.int64]
+    echo &"  Decoder Step {stepNum}: input_ids shape: {currentInputIdsShape}"
     var currentInputIdsTensor: ptr ort.OrtValue
     status = ort.CreateTensorWithDataAsOrtValue(
       memoryInfo, cast[pointer](generatedTokenIds.addr), (generatedTokenIds.len * sizeof(int64)).uint64,
@@ -462,13 +515,14 @@ proc runTrOCRInference*(
       ort.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, addr currentInputIdsTensor
     )
     if status != nil: echo "Error creating input_ids tensor: ", ort.GetErrorMessage(status); return "Error in decoder loop"
-    defer: ort.ReleaseValue(currentInputIdsTensor) # Release at end of current loop iteration or scope
+    defer: ort.ReleaseValue(currentInputIdsTensor)
 
     # Prepare attention_mask tensor (all 1s)
     var attentionMaskData = newSeq[int64](generatedTokenIds.len)
     for i in 0 ..< attentionMaskData.len: attentionMaskData[i] = 1'i64
     let attentionMaskShape: seq[int64] = @[1'i64, attentionMaskData.len.int64]
     var attentionMaskTensor: ptr ort.OrtValue
+    echo &"  Decoder Step {stepNum}: attention_mask shape: {attentionMaskShape}"
     status = ort.CreateTensorWithDataAsOrtValue(
       memoryInfo, cast[pointer](attentionMaskData.addr), (attentionMaskData.len * sizeof(int64)).uint64,
       attentionMaskShape[0].addr, attentionMaskShape.len.uint64,
@@ -476,6 +530,9 @@ proc runTrOCRInference*(
     )
     if status != nil: echo "Error creating attention_mask tensor: ", ort.GetErrorMessage(status); return "Error in decoder loop"
     defer: ort.ReleaseValue(attentionMaskTensor)
+
+    # Logging encoderOutputTensor shape (already logged once, but good to see it per step if needed, or ensure it's stable)
+    # This was already logged after encoder pass: echo &"Encoder output shape: {encOutShape}"
 
     # Define decoder inputs for this step
     # Assuming decoder_model.onnx takes these standard names.
@@ -527,10 +584,16 @@ proc runTrOCRInference*(
     var logitsShape = newSeq[int64](logitsNumDims)
     status = ort.GetDimensions(logitsTypeShapeInfo, logitsShape.addr, logitsNumDims)
     if status != nil: echo "Error GetDimensions for logits: ", ort.GetErrorMessage(status); return "Error processing logits"
+    echo &"  Decoder Step {stepNum}: logits tensor shape: {logitsShape}"
 
-    if logitsShape.len != 3 or logitsShape[0] != 1 or logitsShape[1] != generatedTokenIds.len.int64 or logitsShape[2] != decConfig.vocabSize.int64:
-        echo &"Unexpected logits shape: {logitsShape}. Expected [1, {generatedTokenIds.len}, {decConfig.vocabSize}]"
-        return "Error: Logits shape mismatch."
+    if logitsShape.len != 3 or logitsShape[0] != 1 or logitsShape[1] != generatedTokenIds.len.int64:
+        echo &"Unexpected logits shape structure: {logitsShape}. Expected [1, {generatedTokenIds.len}, vocab_size]"
+        return "Error: Logits shape structure mismatch."
+
+    if logitsShape[2] != decConfig.vocabSize.int64:
+        echo &"CRITICAL Error: Logits vocab_size dimension ({logitsShape[2]}) " &
+             &"does not match configured vocab_size ({decConfig.vocabSize})."
+        return "Error: Logits vocab dimension mismatch."
 
     # Perform argmax on the logits of the last token generated
     let lastTokenLogitsOffset = (generatedTokenIds.len - 1) * decConfig.vocabSize
