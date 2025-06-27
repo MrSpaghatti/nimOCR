@@ -74,74 +74,91 @@ proc normalizeStroke*(stroke: types.Stroke, targetSize: float): types.Stroke =
     result[i].x = newX
     result[i].y = newY
 
-proc rasterizeStroke*(stroke: ui.Stroke, gridSize: int): seq[float] =
-  ## Renders a normalized stroke onto a square grid of gridSize x gridSize.
-  ## The input stroke is assumed to be normalized, with coordinates in [0, gridSize-1].
-  ## Output is a flattened sequence of floats (pixel intensities, 0.0 or 1.0).
+proc rasterizeStrokeToBinaryGrid*(stroke: types.Stroke, gridSize: int, lineThickness: int = 3): seq[bool] =
+  ## Renders a normalized stroke onto a square binary grid.
+  ## Input stroke is assumed to be normalized, with coordinates in [0, gridSize-1].
+  ## Output is a flattened sequence of booleans (true for foreground/stroke).
 
-  result = newSeq[float](gridSize * gridSize) # Initialize grid to all 0.0
+  result = newSeq[bool](gridSize * gridSize) # Initialize grid to all false (background)
 
   if stroke.len < 1:
-    return result # Return empty grid if no points
-
-  # For a single point stroke, mark the corresponding cell.
-  if stroke.len == 1:
-    let p = stroke[0]
-    let x = p.x.int
-    let y = p.y.int
-    if x >= 0 and x < gridSize and y >= 0 and y < gridSize:
-      result[y * gridSize + x] = 1.0
     return result
 
-  # "Draw" lines between consecutive points.
-  # Using a simple line drawing by oversampling. Not as precise as Bresenham's.
+  # Helper to mark a pixel and its neighbors for thickness
+  proc markPixelWithThickness(x, y: int) =
+    for offsetY in -lineThickness div 2 .. lineThickness div 2:
+      for offsetX in -lineThickness div 2 .. lineThickness div 2:
+        let finalX = x + offsetX
+        let finalY = y + offsetY
+        if finalX >= 0 and finalX < gridSize and finalY >= 0 and finalY < gridSize:
+          result[finalY * gridSize + finalX] = true
+
+  if stroke.len == 1:
+    markPixelWithThickness(stroke[0].x.int, stroke[0].y.int)
+    return result
+
   for i in 0 ..< stroke.len - 1:
     let p1 = stroke[i]
     let p2 = stroke[i+1]
 
-    let x1 = p1.x
-    let y1 = p1.y
-    let x2 = p2.x
-    let y2 = p2.y
+    let x1f = p1.x
+    let y1f = p1.y
+    let x2f = p2.x
+    let y2f = p2.y
 
-    let dx = x2 - x1
-    let dy = y2 - y1
-    let steps = max(abs(dx), abs(dy)) * 2.0 # Oversample for denser line; factor of 2 is arbitrary
-                                          # Or use a fixed number of steps, e.g., 100 per segment.
-                                          # Let's make it proportional to length for now.
+    let dx = x2f - x1f
+    let dy = y2f - y1f
 
-    if steps == 0: # p1 and p2 are the same point
-      let x = x1.int
-      let y = y1.int
-      if x >= 0 and x < gridSize and y >= 0 and y < gridSize:
-        result[y * gridSize + x] = 1.0
-      continue
+    # Determine number of steps for line interpolation
+    # Ensure enough steps to cover the distance, considering thickness.
+    let len = sqrt(dx*dx + dy*dy)
+    let steps = if len > 0: int(len * 1.5) else: 1 # Factor 1.5 for density, at least 1 step.
+                                                 # Adjust factor as needed.
 
-    for step in 0 .. int(steps):
-      let t = float(step) / float(steps)
-      let currentX = x1 + t * dx
-      let currentY = y1 + t * dy
-
-      let cellX = currentX.int
-      let cellY = currentY.int
-
-      if cellX >= 0 and cellX < gridSize and cellY >= 0 and cellY < gridSize:
-        result[cellY * gridSize + cellX] = 1.0 # Mark cell as 1.0 (white)
-
-  # Simple thickness: also mark neighboring pixels for each marked pixel
-  # This is a very crude way to add thickness. A better way would be to draw thicker lines.
-  # For now, let's skip this to keep it simple. If lines are too thin, this can be added.
-  # Example of simple 3x3 dilation (would need a copy of result):
-  # var tempResult = result # copy
-  # for r in 1 ..< gridSize - 1:
-  #   for c in 1 ..< gridSize - 1:
-  #     if result[r * gridSize + c] == 1.0:
-  #       for dr in -1..1:
-  #         for dc in -1..1:
-  #           tempResult[(r+dr) * gridSize + (c+dc)] = 1.0
-  # result = tempResult
-
+    for step in 0 .. steps:
+      let t = if steps == 0: 0.0 else: float(step) / float(steps)
+      let currentX = x1f + t * dx
+      let currentY = y1f + t * dy
+      markPixelWithThickness(currentX.round.int, currentY.round.int)
   return result
 
-# The old resampleStroke stub is no longer needed.
-# rasterizeStroke provides the functionality of converting a stroke to a feature vector (bitmap).
+proc rasterizeStrokeToRGB*(stroke: types.Stroke, targetDim: int, lineThickness: int = 3): seq[uint8] =
+  ## Normalizes a stroke and rasterizes it to a 3-channel RGB image (seq[uint8]).
+  ## Stroke is drawn as black (0,0,0) on a white (255,255,255) background.
+
+  let normalizedStroke = normalizeStroke(stroke, targetDim.float)
+  let binaryGrid = rasterizeStrokeToBinaryGrid(normalizedStroke, targetDim, lineThickness)
+
+  result = newSeq[uint8](targetDim * targetDim * 3)
+  for i in 0 ..< binaryGrid.len:
+    let pixelVal = if binaryGrid[i]: 0'u8 else: 255'u8 // Black stroke on white BG
+    result[i * 3 + 0] = pixelVal # R
+    result[i * 3 + 1] = pixelVal # G
+    result[i * 3 + 2] = pixelVal # B
+  return result
+
+proc prepareImageTensor*(imageData: seq[uint8], width: int, height: int, numChannels: int = 3): seq[float32] =
+  ## Converts uint8 RGB image data to a float32 CHW tensor,
+  ## rescaling to [0,1] and normalizing to [-1,1].
+  assert imageData.len == width * height * numChannels, "Image data size mismatch"
+
+  result = newSeq[float32](width * height * numChannels)
+  let rescaleFactor = 1.0f / 255.0f
+  let imageMean = [0.5f, 0.5f, 0.5f] # Per-channel mean
+  let imageStd = [0.5f, 0.5f, 0.5f]  # Per-channel std
+
+  for c in 0 ..< numChannels:
+    for y in 0 ..< height:
+      for x in 0 ..< width:
+        let srcIdx = (y * width + x) * numChannels + c
+        let pixelUint8 = imageData[srcIdx]
+
+        let rescaledPixel = pixelUint8.float32 * rescaleFactor
+        let normalizedPixel = (rescaledPixel - imageMean[c]) / imageStd[c]
+
+        # CHW format: result[channel * H * W + row * W + col]
+        result[c * height * width + y * width + x] = normalizedPixel
+  return result
+
+# Delete the old MNIST-specific rasterizeStroke
+# proc rasterizeStroke*(stroke: types.Stroke, gridSize: int): seq[float] = ... (old implementation)

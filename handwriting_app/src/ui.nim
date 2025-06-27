@@ -12,14 +12,14 @@ const
   WindowWidth = 800
   WindowHeight = 600
 
-# Helper procedure to process a stroke for inference.
-# Normalizes the stroke and then rasterizes it to a grid.
-proc processStrokeForInference*(stroke: types.Stroke, gridSize: int): seq[float] =
-  # 1. Normalize the stroke. Coordinates will be in [0, gridSize-1].
-  let normalizedStroke = preprocessing.normalizeStroke(stroke, gridSize.float)
+# Helper procedure to process a stroke for TrOCR inference.
+proc processStrokeForTrOCR*(stroke: types.Stroke, targetDim: int, lineThickness: int = 3): seq[float32] =
+  # 1. Rasterize stroke to a 3-channel RGB uint8 image (0-255).
+  #    normalizeStroke is called within rasterizeStrokeToRGB.
+  let rgbImageData = preprocessing.rasterizeStrokeToRGB(stroke, targetDim, lineThickness)
 
-  # 2. Rasterize the normalized stroke to a grid.
-  result = preprocessing.rasterizeStroke(normalizedStroke, gridSize)
+  # 2. Convert to float32 tensor, rescale [0,1], normalize [-1,1], and set CHW format.
+  result = preprocessing.prepareImageTensor(rgbImageData, targetDim, targetDim, 3)
 
 proc runApplication*() =
   var screen = window(WindowWidth, WindowHeight, "Nim Handwriting Recognition", 0)
@@ -28,59 +28,69 @@ proc runApplication*() =
   var handwriting = newSeq[types.Stroke]()
   var currentStroke = newSeq[types.Point]()
   var isDrawing = false
-  var recognizedText = "Draw a digit (0-9)" # Text to display
+  var recognizedText = "Draw some text..." # Updated default text
+  let font = tfont()
 
-  # Load a font for displaying text
-  let font = tfont() # Default TIGR font
+  # Load TrOCR tokenizer data and decoder configuration
+  # Define paths relative to the src directory where main.nim is expected to be run
+  let modelsBaseDir = "../models/trocr/"
+  let vocabPath = modelsBaseDir & "vocab.json"
+  let genConfigPath = modelsBaseDir & "generation_config.json"
+  let mainConfigPath = modelsBaseDir & "config.json" # Main config might have some fallbacks
+
+  let (idToTokenMap, decoderConfig) = inference.loadTrOCTokenizerData(
+      vocabPath, genConfigPath, mainConfigPath
+  )
+
+  if idToTokenMap.len == 0:
+    echo "FATAL: Failed to load TrOCR tokenizer data. Check paths and file integrity."
+    recognizedText = "Error: Tokenizer failed to load. Check console."
+    # Allow window to run to show error, but inference won't work.
+
+  let encoderPath = modelsBaseDir & "encoder_model.onnx"
+  let decoderPath = modelsBaseDir & "decoder_model.onnx" # Or decoder_model_merged.onnx
 
   while screen.closed() == 0:
-    # 1. Handle Input and Update State
     let mouseX = screen.mouseX().float
     let mouseY = screen.mouseY().float
 
     if screen.mouseDown(TIGR_MOUSE_LEFT):
       if not isDrawing:
-        # Mouse button was just pressed: start a new stroke
         isDrawing = true
-        currentStroke = newSeq[Point]() # Clear any previous data
-        # Use system.getTime().toUnixMillis() as per tutorial context
-        let p = Point(x: mouseX, y: mouseY, timestamp: system.getTime().toUnixMillis(), pressure: 1.0)
-        currentStroke.add(p)
+        currentStroke = newSeq[types.Point]()
+        currentStroke.add(types.Point(x: mouseX, y: mouseY, timestamp: system.getTime().toUnixMillis(), pressure: 1.0))
       else:
-        # Mouse is being dragged: add a point to the current stroke
-        let p = Point(x: mouseX, y: mouseY, timestamp: system.getTime().toUnixMillis(), pressure: 1.0)
-        currentStroke.add(p)
+        currentStroke.add(types.Point(x: mouseX, y: mouseY, timestamp: system.getTime().toUnixMillis(), pressure: 1.0))
     else:
       if isDrawing:
-        # Mouse button was just released: finalize the stroke
         isDrawing = false
         if currentStroke.len > 1:
           handwriting.add(currentStroke)
 
-          # TRIGGER THE RECOGNITION PIPELINE
-          # Process the current stroke to get features (rasterized bitmap)
-          const gridSize = 28 # For MNIST model
-          let features = processStrokeForInference(currentStroke, gridSize)
-
-          # Ensure features are of the expected size (gridSize * gridSize)
-          if features.len == gridSize * gridSize:
-            # The model path is relative to where the executable is run.
-            # If running from src/: ../models/mnist-12.onnx
-            # If executable is in project root: models/mnist-12.onnx
-            # The README suggests running from src/, so ../models/ is appropriate.
-            # Note: inference.runInference will need to be updated to accept seq[float]
-            let digit = inference.runInference("../models/mnist-12.onnx", features)
-            if digit != -1:
-              recognizedText = &"Recognized: {digit}"
-            else:
-              recognizedText = "Could not recognize."
+          if idToTokenMap.len == 0: # Check if tokenizer loaded
+             recognizedText = "Tokenizer error. Cannot recognize."
           else:
-            recognizedText = "Not enough data for recognition."
+            const trocrGridSize = 384
+            const lineThickness = 3 # Adjust as needed
+            echo "Processing stroke for TrOCR..."
+            let features = processStrokeForTrOCR(currentStroke, trocrGridSize, lineThickness)
 
-        currentStroke = newSeq[Point]() # Reset for the next stroke
+            if features.len == trocrGridSize * trocrGridSize * 3:
+              echo "Running TrOCR inference..."
+              recognizedText = inference.runTrOCRInference(
+                  encoderPath, decoderPath, features, idToTokenMap, decoderConfig
+              )
+              if recognizedText.startsWith("Error:"):
+                echo recognizedText // Log error to console
+              else:
+                echo &"Recognized: {recognizedText}"
+            else:
+              recognizedText = "Preprocessing error."
+              echo &"Error: Feature length mismatch. Expected {trocrGridSize*trocrGridSize*3}, got {features.len}"
 
-    # 2. Render the screen
-    screen.clear(RGB(20, 20, 30)) # Dark blue-gray
+        currentStroke = newSeq[types.Point]()
+
+    screen.clear(RGB(20, 20, 30))
 
     # Draw all completed strokes in gray
     for stroke in handwriting:
@@ -97,15 +107,15 @@ proc runApplication*() =
     screen.print(font, 10, 10, RGB(255, 255, 0), recognizedText)
 
     # Display instructions
-    screen.print(font, 10, WindowHeight - 30, RGB(150, 150, 150), "Draw a digit (0-9). Release mouse to recognize.")
+    screen.print(font, 10, WindowHeight - 30, RGB(150, 150, 150), "Draw text. Release mouse to recognize.")
     screen.print(font, 10, WindowHeight - 15, RGB(150, 150, 150), "Press any key to clear.")
 
 
     # Add a clear screen function
     if screen.key() != 0: # Check if any key was pressed
-      handwriting = newSeq[Stroke]()
-      currentStroke = newSeq[Point]() # Also clear current stroke if any
+      handwriting = newSeq[types.Stroke]()
+      currentStroke = newSeq[types.Point]() # Also clear current stroke if any
       isDrawing = false # Ensure drawing state is reset
-      recognizedText = "Draw a digit (0-9)" # Reset text
+      recognizedText = "Draw some text..." # Reset text
 
     screen.update()

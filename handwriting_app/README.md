@@ -1,6 +1,6 @@
 # Nim Online Handwriting Recognition Application
 
-This application allows users to draw digits (0-9) on a canvas, and it uses a pre-trained ONNX model to recognize the handwritten digits in real-time. This project is based on the tutorial found in `tutorial.md`.
+This application allows users to draw English text on a canvas, and it uses a pre-trained TrOCR (Transformer Optical Character Recognition) ONNX model to recognize the handwritten text in real-time. This project was initially based on the `tutorial.md` for digit recognition and has been updated to support full text recognition.
 
 ## Prerequisites
 
@@ -17,7 +17,9 @@ Before you can build and run this application, you will need the following insta
 3.  **Required Nim Libraries:**
     *   **tigr:** For the graphical user interface.
     *   **onnxruntime:** For running the ONNX model.
-    *   Install them using Nimble:
+    *   **json:** For parsing model configuration files (usually included with Nim).
+    *   **tables:** For vocabulary mapping (usually included with Nim).
+    *   Install external libraries using Nimble:
         ```bash
         nimble install tigr onnxruntime
         ```
@@ -26,20 +28,32 @@ Before you can build and run this application, you will need the following insta
     *   The `onnxruntime` Nimble package is a wrapper around the ONNX Runtime C library. You need to have the actual shared library (`.dll` for Windows, `.so` for Linux, `.dylib` for macOS) available.
     *   Download it from the [ONNX Runtime GitHub Releases page](https://github.com/microsoft/onnxruntime/releases). Make sure to download the version appropriate for your operating system and CPU architecture.
     *   Extract the archive and place the shared library file (e.g., `onnxruntime.dll`, `libonnxruntime.so`) either:
-        *   In the same directory where your compiled `main` executable will be (e.g., inside the `handwriting_app` directory after compilation, or in `handwriting_app/src` if running directly from source with `nim c -r src/main.nim`).
-        *   In a directory that is part of your system's standard library search path (e.g., `/usr/lib` on Linux, or a directory added to `PATH` on Windows).
+        *   In the same directory where your compiled `main` executable will be (e.g., `handwriting_app/src/` if running `nim c -r main.nim` from within `src/`).
+        *   In a directory that is part of your system's standard library search path.
 
-5.  **Pre-trained MNIST Model:**
-    *   Download the `mnist-12.onnx` model file. A common source for such models is the [Hugging Face Model Hub](https://huggingface.co/models) or directly from ONNX model zoos. For this project, the tutorial refers to `mnist-12.onnx`.
-    *   Place the `mnist-12.onnx` file into the `handwriting_app/models/` directory. The application expects it to be at `../models/mnist-12.onnx` relative to the source files, or `models/mnist-12.onnx` relative to the project root if running the compiled executable from the project root.
+5.  **Pre-trained TrOCR Model and Tokenizer Files:**
+    *   This project uses the `Xenova/trocr-base-handwritten` model, which is an ONNX version of `microsoft/trocr-base-handwritten`.
+    *   You need to download the following files from the [Xenova/trocr-base-handwritten Hugging Face repository](https://huggingface.co/Xenova/trocr-base-handwritten/tree/main):
+        *   From the `onnx/` subfolder:
+            *   `encoder_model.onnx`
+            *   `decoder_model.onnx` (or `decoder_model_merged.onnx` - the UI currently expects `decoder_model.onnx`)
+        *   From the main folder (root of the repository):
+            *   `vocab.json`
+            *   `config.json`
+            *   `preprocessor_config.json`
+            *   `generation_config.json` (if available, otherwise some defaults are used)
+            *   `special_tokens_map.json` (good for reference, though IDs are often in other configs)
+    *   Create a directory `handwriting_app/models/trocr/`.
+    *   Place all the downloaded files into this `handwriting_app/models/trocr/` directory. The application expects them at `../models/trocr/` relative to the `src/` directory.
 
 ## Building and Running
 
-1.  Navigate to the `handwriting_app/src` directory:
+1.  Ensure all prerequisites and model files are set up as described above.
+2.  Navigate to the `handwriting_app/src` directory:
     ```bash
     cd handwriting_app/src
     ```
-2.  Compile and run the main application:
+3.  Compile and run the main application:
     ```bash
     nim c -r main.nim
     ```
@@ -47,32 +61,38 @@ Before you can build and run this application, you will need the following insta
     ```bash
     nim c main.nim
     ```
-    Then run `./main` (or `main.exe` on Windows). If you build this way, ensure the `models` directory is correctly pathed or copy the executable to the project root (`handwriting_app/`) and run it from there.
+    Then run `./main` (or `main.exe` on Windows). If you build this way, ensure the `models/trocr/` directory path is correctly accessible from where you run the executable (e.g., run from `src/` or copy executable to project root and adjust paths if necessary).
 
 ## Common Errors and Solutions
 
 *   **Error: `cannot open file: onnxruntime.dll` (or `libonnxruntime.so`, `libonnxruntime.dylib`)**
-    *   **Cause:** The ONNX Runtime shared library is not found by the application.
-    *   **Solution:**
-        1.  Ensure you have downloaded the correct ONNX Runtime shared library for your OS.
-        2.  Place the library file (e.g., `onnxruntime.dll`) in the same directory as your compiled executable (e.g., `handwriting_app/src/` if running `nim c -r main.nim`, or `handwriting_app/` if you compiled and moved the executable there).
-        3.  Alternatively, add the directory containing the shared library to your system's `PATH` (Windows) or `LD_LIBRARY_PATH` (Linux/macOS).
+    *   **Cause:** The ONNX Runtime shared library is not found.
+    *   **Solution:** See step 4 in Prerequisites. Ensure the library is in the executable's directory or system path.
 
-*   **Error: `Error: Model file not found at ../models/mnist-12.onnx`**
-    *   **Cause:** The `mnist-12.onnx` model file is not in the expected location.
-    *   **Solution:**
-        1.  Make sure you have downloaded the `mnist-12.onnx` file.
-        2.  Place it inside the `handwriting_app/models/` directory.
-        3.  The path used in `inference.nim` is relative. If running `nim c -r src/main.nim` from the `handwriting_app` directory, the path `models/mnist-12.onnx` might be more appropriate. If running from `handwriting_app/src`, then `../models/mnist-12.onnx` is correct. The boilerplate will use `../models/mnist-12.onnx` assuming execution from the `src` directory or that the executable is run from a location where this relative path is valid.
+*   **Error: `Error: Model file not found at ../models/trocr/...` or `Error: vocab.json not found...`**
+    *   **Cause:** Model or tokenizer/config files are missing or in the wrong location.
+    *   **Solution:** See step 5 in Prerequisites. Ensure all required files from `Xenova/trocr-base-handwritten` are downloaded and placed into `handwriting_app/models/trocr/`.
+
+*   **Error: `Error creating ONNX Session...` or `Error during ONNX Run...`**
+    *   **Cause 1:** Incorrect ONNX model files (e.g., corrupted download, wrong version).
+    *   **Solution 1:** Re-download the ONNX files for encoder and decoder from `Xenova/trocr-base-handwritten`.
+    *   **Cause 2 (Critical):** Mismatch between the ONNX model's expected input/output node names or tensor shapes and what's implemented in `inference.nim`. The current implementation uses:
+        *   Encoder Input: `"pixel_values"` (shape `[1,3,384,384]`)
+        *   Encoder Output: `"last_hidden_state"`
+        *   Decoder Inputs: `"input_ids"`, `"attention_mask"`, `"encoder_hidden_states"`
+        *   Decoder Output: `"logits"`
+    *   **Solution 2:** If these are incorrect for the specific ONNX files you downloaded (especially if you chose a different decoder variant like one with `_past_`), you may need to inspect your `.onnx` files with a tool like Netron and update the node names in `inference.nim`.
 
 *   **Compilation Error: `Error: cannot open file: tigr` or `Error: cannot open file: onnxruntime_c_api`**
-    *   **Cause:** The required Nimble packages (`tigr` or `onnxruntime`) are not installed.
-    *   **Solution:** Run `nimble install tigr onnxruntime` in your terminal.
+    *   **Cause:** Required Nimble packages are not installed.
+    *   **Solution:** Run `nimble install tigr onnxruntime`.
 
-*   **Application runs, but recognition always fails or gives unexpected results.**
-    *   **Cause 1:** The input preprocessing might not perfectly align with what the `mnist-12.onnx` model expects. The tutorial provides a conceptual preprocessing pipeline.
-    *   **Solution 1:** Double-check the preprocessing steps, especially normalization and how features are fed to the model. The `mnist-12.onnx` model typically expects a 1x1x28x28 grayscale image or a flattened array of 784 pixels. The current boilerplate will set up stubs based on the tutorial, which might need refinement for optimal performance.
-    *   **Cause 2:** The specific `mnist-12.onnx` model you downloaded might have slightly different input/output node names than what's in the tutorial's `inference.nim` example.
-    *   **Solution 2:** Use a tool like Netron to inspect your `.onnx` model and verify the exact input and output node names. Update these names in `inference.nim` if they differ. The tutorial uses "Input3" and "Plus214_Output_0".
+*   **Application runs, but recognition is poor or outputs gibberish:**
+    *   **Cause 1:** Image preprocessing in `preprocessing.nim` might not perfectly align with the TrOCR model's training. The current `rasterizeStrokeToRGB` is basic. Line thickness, anti-aliasing, or exact pixel value distribution might matter.
+    *   **Solution 1:** Experiment with `lineThickness` in `ui.nim` or refine the `rasterizeStrokeToRGB` and `prepareImageTensor` functions in `preprocessing.nim`. Check the TrOCR model's documentation for any very specific preprocessing nuances.
+    *   **Cause 2:** Basic greedy decoding is used. For more complex handwriting, this might not be optimal.
+    *   **Solution 2:** (Future enhancement) Implement beam search decoding in `inference.nim`.
+    *   **Cause 3:** The detokenization in `inference.nim` is basic (handles `Ġ` for spaces). Full BPE detokenization can be more complex.
+    *   **Solution 3:** (Future enhancement) Implement more robust detokenization if subword artifacts are common.
 
-This README provides a starting point. Refer to `tutorial.md` for the full context and detailed explanations of each part of the application.
+This README provides guidance for setting up and running the updated TrOCR-based handwriting recognition application.
