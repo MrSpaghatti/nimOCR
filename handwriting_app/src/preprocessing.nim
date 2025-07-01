@@ -42,7 +42,7 @@ proc normalizeStroke*(stroke: types.Stroke, targetSize: float): types.Stroke =
   let scaleTo = if N >= 1.0: N - 1.0 else: 0.0
 
   if width == 0 and height == 0: # Single point
-    result = newSeq[ui.Point](1)
+    result = newSeq[types.Point](1) # Corrected from ui.Point
     result[0] = stroke[0] # Copy timestamp and pressure
     # Place single point in the center of the [0, scaleTo] range.
     # If scaleTo is 0.0 (targetSize=1), point becomes (0.0, 0.0).
@@ -62,7 +62,7 @@ proc normalizeStroke*(stroke: types.Stroke, targetSize: float): types.Stroke =
     # maxDim is > 0 here.
     scaleFactor = scaleTo / maxDim
 
-  result = newSeq[ui.Point](stroke.len)
+  result = newSeq[types.Point](stroke.len) # Corrected from ui.Point
   for i, p in stroke:
     result[i] = p # Copy timestamp and pressure
     # Apply translation to move the stroke's bounding box origin (minX, minY) to (0,0)
