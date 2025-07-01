@@ -30,6 +30,10 @@ proc runApplication*() =
   var isDrawing = false
   var recognizedText = "Loading models & tokenizer..." # Initial text
   let font = tfont()
+
+  const DefaultLineThickness = 3 // For TrOCR rasterization
+  const TrOCRGridSize = 384      // Target dimension for TrOCR model
+
   screen.print(font, 10, 10, RGB(255, 255, 0), recognizedText)
   screen.update() # Show loading message immediately
 
@@ -90,25 +94,20 @@ proc runApplication*() =
           else:
             recognizedText = "Processing..."
             # Force redraw to show "Processing..."
-            # This requires clearing, drawing strokes, then printing new text and updating
             screen.clear(RGB(20,20,30))
             for strokeDraw in handwriting: # Draw existing strokes
               if strokeDraw.len >= 2:
                 for i in 0 ..< strokeDraw.len - 1:
                   screen.line(strokeDraw[i].x.int, strokeDraw[i].y.int, strokeDraw[i+1].x.int, strokeDraw[i+1].y.int, RGB(100,100,100))
-            # Don't draw currentStroke as it's now part of handwriting / being processed
             screen.print(font, 10, 10, RGB(255, 255, 0), recognizedText) // Show "Processing..."
             screen.print(font, 10, WindowHeight - 30, RGB(150,150,150), "Draw text. Release mouse to recognize.")
             screen.print(font, 10, WindowHeight - 15, RGB(150,150,150), "Press any key to clear.")
             screen.update()
 
-
-            const trocrGridSize = 384
-            const lineThickness = 3 # Adjust as needed
             echo "Processing stroke for TrOCR..."
-            let features = processStrokeForTrOCR(currentStroke, trocrGridSize, lineThickness)
+            let features = processStrokeForTrOCR(currentStroke, TrOCRGridSize, DefaultLineThickness)
 
-            if features.len == trocrGridSize * trocrGridSize * 3:
+            if features.len == TrOCRGridSize * TrOCRGridSize * 3:
               echo "Running TrOCR inference..."
               recognizedText = inference.runTrOCRInference(
                   encoderPath, decoderPath, features, idToTokenMap, decoderConfig
